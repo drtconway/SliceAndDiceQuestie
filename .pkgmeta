@@ -1,0 +1,2 @@
+# BigWigs packager settings (see .github/workflows/release.yml).
+package-as: SliceAndDiceQuestie
