@@ -82,51 +82,67 @@ local function QuestLine(id, entry, pl)
     return text, right
 end
 
+local function Summary(nChains, open, xp)
+    local chains = (nChains > 0) and format("%d chain%s, ", nChains, nChains == 1 and "" or "s") or ""
+    return "|cff909090" .. chains .. open .. " to do  " .. ShortXP(xp) .. "|r"
+end
+
+local function AddZone(g, db, pl)
+    local zkey = "z" .. tostring(g.key)
+    local zc = db.collapsed[zkey]
+    display[#display + 1] = {
+        kind = "zone", key = zkey, indent = 12,
+        text = "|cffffd100" .. (zc and "[+] " or "[-] ") .. g.name .. "|r",
+        right = Summary(g.nChains, g.open, g.xp),
+    }
+    if zc then return end
+    for _, entry in ipairs(g.chains) do
+        local comp = entry.comp
+        local base, skip = 0, false
+        if comp.size > 1 then
+            local ckey = "c" .. comp.members[1]
+            local cc = db.collapsed[ckey]
+            local first = Data.quests[comp.members[1]]
+            display[#display + 1] = {
+                kind = "chain", key = ckey, indent = 24,
+                text = "|cffd8d8d8" .. (cc and "[+] " or "[-] ") .. first.name .. "|r |cff808080- "
+                    .. comp.size .. " quests, levels " .. (entry.minL or "?") .. "-" .. (entry.maxL or "?") .. "|r",
+                right = "|cff909090" .. ShortXP(entry.xp) .. "|r",
+            }
+            base, skip = 1, cc
+        end
+        if not skip then
+            for _, id in ipairs(comp.members) do
+                local st = entry.status[id]
+                if (db.wholeChain or entry.matched[id]) and (db.showDone or st ~= "done") then
+                    local text, right = QuestLine(id, entry, pl)
+                    local steps = base + min(comp.depth[id] or 0, MAX_INDENT_STEPS)
+                    display[#display + 1] = {
+                        kind = "quest", id = id, entry = entry,
+                        indent = 24 + steps * 12, text = text, right = right,
+                    }
+                end
+            end
+        end
+    end
+end
+
 function UI:BuildDisplay()
     local db = ns.db
     local pl = ns.PlayerLevel()
-    local groups, totals = Data:Query(Options(), pl)
+    local buckets, totals = Data:Query(Options(), pl)
     wipe(display)
 
-    for _, g in ipairs(groups) do
-        local zkey = "z" .. tostring(g.key)
-        local zc = db.collapsed[zkey]
-        local summary = (g.nChains > 0) and format("%d chain%s, ", g.nChains, g.nChains == 1 and "" or "s") or ""
+    for _, bk in ipairs(buckets) do
+        local bkey = "b" .. bk.name
+        local bc = db.collapsed[bkey]
         display[#display + 1] = {
-            kind = "zone", key = zkey,
-            text = "|cffffd100" .. (zc and "[+] " or "[-] ") .. g.name .. "|r",
-            right = "|cff909090" .. summary .. g.open .. " to do  " .. ShortXP(g.xp) .. "|r",
+            kind = "bucket", key = bkey, indent = 0,
+            text = "|cff66ccff" .. (bc and "[+] " or "[-] ") .. bk.name .. "|r",
+            right = Summary(bk.nChains, bk.open, bk.xp),
         }
-        if not zc then
-            for _, entry in ipairs(g.chains) do
-                local comp = entry.comp
-                local base, skip = 0, false
-                if comp.size > 1 then
-                    local ckey = "c" .. comp.members[1]
-                    local cc = db.collapsed[ckey]
-                    local first = Data.quests[comp.members[1]]
-                    display[#display + 1] = {
-                        kind = "chain", key = ckey, indent = 10,
-                        text = "|cffd8d8d8" .. (cc and "[+] " or "[-] ") .. first.name .. "|r |cff808080- "
-                            .. comp.size .. " quests, levels " .. (entry.minL or "?") .. "-" .. (entry.maxL or "?") .. "|r",
-                        right = "|cff909090" .. ShortXP(entry.xp) .. "|r",
-                    }
-                    base, skip = 1, cc
-                end
-                if not skip then
-                    for _, id in ipairs(comp.members) do
-                        local st = entry.status[id]
-                        if (db.wholeChain or entry.matched[id]) and (db.showDone or st ~= "done") then
-                            local text, right = QuestLine(id, entry, pl)
-                            local steps = base + min(comp.depth[id] or 0, MAX_INDENT_STEPS)
-                            display[#display + 1] = {
-                                kind = "quest", id = id, entry = entry,
-                                indent = 10 + steps * 12, text = text, right = right,
-                            }
-                        end
-                    end
-                end
-            end
+        if not bc then
+            for _, g in ipairs(bk.groups) do AddZone(g, db, pl) end
         end
     end
 
@@ -167,7 +183,7 @@ end
 
 local function RowOnClick(row)
     local item = row.item
-    if item and (item.kind == "zone" or item.kind == "chain") then
+    if item and (item.kind == "bucket" or item.kind == "zone" or item.kind == "chain") then
         ns.db.collapsed[item.key] = (not ns.db.collapsed[item.key]) or nil
         UI:Refresh()
     end
@@ -212,7 +228,13 @@ function UI:UpdateRows()
         local item = (i <= visible) and display[offset + i]
         row.item = item
         if item then
-            row.text:SetFontObject(item.kind == "zone" and "GameFontNormal" or "GameFontHighlightSmall")
+            local font = "GameFontHighlightSmall"
+            if item.kind == "bucket" then
+                font = "GameFontNormalLarge"
+            elseif item.kind == "zone" then
+                font = "GameFontNormal"
+            end
+            row.text:SetFontObject(font)
             row.text:ClearAllPoints()
             row.text:SetPoint("LEFT", row, "LEFT", 4 + (item.indent or 0), 0)
             row.text:SetPoint("RIGHT", row.right, "LEFT", -6, 0)

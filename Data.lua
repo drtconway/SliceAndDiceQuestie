@@ -39,6 +39,20 @@ local SORT_NAMES = {
     [-367] = "Reputation", [-368] = "Invasion", [-369] = "Midsummer", [-370] = "Brewfest",
 }
 
+-- Class ID (from UnitClass) to its quest sort, so class quests zoned to a city group under the class name.
+local CLASS_SORT_BY_ID = {
+    [1] = -81, [2] = -141, [3] = -261, [4] = -162, [5] = -262, [7] = -82, [8] = -161, [9] = -61, [11] = -263,
+}
+local CLASS_PROF_SORTS = {
+    [-61] = true, [-81] = true, [-82] = true, [-141] = true, [-161] = true, [-162] = true,
+    [-261] = true, [-262] = true, [-263] = true,                                   -- classes
+    [-24] = true, [-101] = true, [-121] = true, [-181] = true, [-182] = true,
+    [-201] = true, [-264] = true, [-304] = true, [-324] = true,                    -- professions
+}
+
+Data.BUCKET_CLASSPROF = "Class & Professions"
+Data.BUCKET_OTHER = "Other"
+
 local function IsJunkName(name)
     return strfind(name, "UNUSED", 1, true) or strfind(name, "DEPRECATED", 1, true)
         or strfind(name, "[PH]", 1, true) or strfind(name, "^zz")
@@ -93,6 +107,60 @@ local function GroupKey(zone, dungeon)
         if ok and type(parent) == "number" and parent > 0 then return parent end
     end
     return zone
+end
+
+-- Continent name for a (parent) zone: walk the game's map tree up to the continent,
+-- falling back to Questie's zone table, where map 0 is Eastern Kingdoms and map 1 is Kalimdor.
+local continentCache = {}
+local fallbackContinentByArea
+
+local function FallbackContinent(areaId)
+    if not fallbackContinentByArea then
+        fallbackContinentByArea = {}
+        local l10n = Import("l10n")
+        local names = { [0] = "Eastern Kingdoms", [1] = "Kalimdor" }
+        if l10n and type(l10n.zoneLookup) == "table" then
+            for mapId, continent in pairs(names) do
+                local zones = l10n.zoneLookup[mapId]
+                if type(zones) == "table" then
+                    for id in pairs(zones) do fallbackContinentByArea[id] = continent end
+                end
+            end
+        end
+    end
+    return fallbackContinentByArea[areaId]
+end
+
+local function ContinentOf(areaId)
+    local cached = continentCache[areaId]
+    if cached then return cached end
+    local name
+    local ZoneDB = Import("ZoneDB")
+    if ZoneDB and ZoneDB.GetUiMapIdByAreaId and C_Map and C_Map.GetMapInfo then
+        local ok, uiMapId = pcall(ZoneDB.GetUiMapIdByAreaId, ZoneDB, areaId)
+        local continentType = (Enum and Enum.UIMapType and Enum.UIMapType.Continent) or 2
+        local info = ok and uiMapId and C_Map.GetMapInfo(uiMapId)
+        local guard = 0
+        while info and guard < 10 do
+            if info.mapType == continentType then name = info.name; break end
+            if not info.parentMapID or info.parentMapID == 0 then break end
+            info = C_Map.GetMapInfo(info.parentMapID)
+            guard = guard + 1
+        end
+    end
+    name = name or FallbackContinent(areaId) or Data.BUCKET_OTHER
+    continentCache[areaId] = name
+    return name
+end
+
+-- Top-level bucket and the group key inside it for one quest.
+local function Bucket(zone, group, classes, classId)
+    if classes ~= 0 or CLASS_PROF_SORTS[zone] then
+        return Data.BUCKET_CLASSPROF, (zone < 0) and zone or (CLASS_SORT_BY_ID[classId] or group)
+    elseif zone <= 0 then
+        return Data.BUCKET_OTHER, zone
+    end
+    return ContinentOf(group), group
 end
 
 ---------------------------------------------------------------------------
@@ -202,9 +270,11 @@ function Data:Build()
                     and not BATTLEGROUNDS[zone] and zone ~= SORT_BATTLEGROUNDS then
                     local ql, rl = tonumber(v[2]) or 0, tonumber(v[3]) or 0
                     local dungeon = IsDungeon(zone)
+                    local group = GroupKey(zone, dungeon)
+                    local bucket, gkey = Bucket(zone, group, classes, classId)
                     quests[id] = {
                         id = id, name = name, ql = ql, rl = rl, lvl = (ql > 0) and ql or rl,
-                        classes = classes, zone = zone, dungeon = dungeon, group = GroupKey(zone, dungeon),
+                        classes = classes, zone = zone, dungeon = dungeon, bucket = bucket, gkey = gkey,
                     }
                     raw[id] = v
                 end
@@ -373,7 +443,7 @@ function Data:Query(o, playerLevel)
     local quests = self.quests
     local hiddenByUser = (Questie and Questie.db and Questie.db.char and Questie.db.char.hidden) or {}
     local search = (o.search and o.search ~= "") and strlower(o.search) or nil
-    local groups, byKey = {}, {}
+    local buckets, byBucket = {}, {}
     local totals = { chains = 0, quests = 0, xp = 0 }
 
     for _, comp in ipairs(self.comps) do
@@ -394,6 +464,16 @@ function Data:Query(o, playerLevel)
 
             if matched and hit and (open or not o.hideDone) then
                 local entry = { comp = comp, matched = matched, status = {}, xp = 0, open = 0 }
+                -- The chain goes in the bucket most of its in-range quests belong to,
+                -- and under the most common group within that bucket.
+                local bCounts, bucket, bN = {}, nil, 0
+                for _, id in ipairs(comp.members) do
+                    if matched[id] then
+                        local b = quests[id].bucket
+                        bCounts[b] = (bCounts[b] or 0) + 1
+                        if bCounts[b] > bN then bucket, bN = b, bCounts[b] end
+                    end
+                end
                 local counts, bestKey, bestN = {}, nil, 0
                 for _, id in ipairs(comp.members) do
                     local q = quests[id]
@@ -405,9 +485,11 @@ function Data:Query(o, playerLevel)
                     end
                     if matched[id] then
                         entry.sortLevel = entry.sortLevel or q.lvl
-                        local k = q.group
-                        counts[k] = (counts[k] or 0) + 1
-                        if counts[k] > bestN then bestKey, bestN = k, counts[k] end
+                        if q.bucket == bucket then
+                            local k = q.gkey
+                            counts[k] = (counts[k] or 0) + 1
+                            if counts[k] > bestN then bestKey, bestN = k, counts[k] end
+                        end
                         if st ~= "done" then
                             entry.open = entry.open + 1
                             entry.xp = entry.xp + self:XP(id)
@@ -415,17 +497,23 @@ function Data:Query(o, playerLevel)
                     end
                 end
 
-                local g = byKey[bestKey]
+                local bk = byBucket[bucket]
+                if not bk then
+                    bk = { name = bucket, groups = {}, byKey = {}, open = 0, xp = 0, nChains = 0 }
+                    byBucket[bucket] = bk
+                    buckets[#buckets + 1] = bk
+                end
+                local g = bk.byKey[bestKey]
                 if not g then
                     g = { key = bestKey, name = Data.ZoneName(bestKey), chains = {}, open = 0, xp = 0, nChains = 0 }
-                    byKey[bestKey] = g
-                    groups[#groups + 1] = g
+                    bk.byKey[bestKey] = g
+                    bk.groups[#bk.groups + 1] = g
                 end
                 g.chains[#g.chains + 1] = entry
-                g.open = g.open + entry.open
-                g.xp = g.xp + entry.xp
+                g.open, bk.open = g.open + entry.open, bk.open + entry.open
+                g.xp, bk.xp = g.xp + entry.xp, bk.xp + entry.xp
                 if comp.size > 1 then
-                    g.nChains = g.nChains + 1
+                    g.nChains, bk.nChains = g.nChains + 1, bk.nChains + 1
                     totals.chains = totals.chains + 1
                 end
                 totals.quests = totals.quests + entry.open
@@ -434,14 +522,30 @@ function Data:Query(o, playerLevel)
         end
     end
 
-    tsort(groups, function(a, b) return a.name < b.name end)
-    for _, g in ipairs(groups) do
-        tsort(g.chains, function(a, b)
-            local ca, cb = a.comp.size > 1, b.comp.size > 1
-            if ca ~= cb then return ca end -- chains before single quests
-            if (a.sortLevel or 0) ~= (b.sortLevel or 0) then return (a.sortLevel or 0) < (b.sortLevel or 0) end
-            return quests[a.comp.members[1]].name < quests[b.comp.members[1]].name
-        end)
+    -- Eastern Kingdoms, Kalimdor, any other continent alphabetically, then Class & Professions, then Other.
+    local function Rank(name)
+        if name == "Eastern Kingdoms" then return 1 end
+        if name == "Kalimdor" then return 2 end
+        if name == Data.BUCKET_CLASSPROF then return 8 end
+        if name == Data.BUCKET_OTHER then return 9 end
+        return 3
     end
-    return groups, totals
+    tsort(buckets, function(a, b)
+        local ra, rb = Rank(a.name), Rank(b.name)
+        if ra ~= rb then return ra < rb end
+        return a.name < b.name
+    end)
+    for _, bk in ipairs(buckets) do
+        bk.byKey = nil
+        tsort(bk.groups, function(a, b) return a.name < b.name end)
+        for _, g in ipairs(bk.groups) do
+            tsort(g.chains, function(a, b)
+                local ca, cb = a.comp.size > 1, b.comp.size > 1
+                if ca ~= cb then return ca end -- chains before single quests
+                if (a.sortLevel or 0) ~= (b.sortLevel or 0) then return (a.sortLevel or 0) < (b.sortLevel or 0) end
+                return quests[a.comp.members[1]].name < quests[b.comp.members[1]].name
+            end)
+        end
+    end
+    return buckets, totals
 end
