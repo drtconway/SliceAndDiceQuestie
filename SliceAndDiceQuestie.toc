@@ -1,0 +1,11 @@
+## Interface: 16001
+## Title: SliceAndDiceQuestie
+## Notes: Finds quest chains in a level range using Questie's database. Type /sdq to open.
+## Author: drtomc
+## Version: @project-version@
+## Dependencies: Questie, QuestieDB
+## SavedVariablesPerCharacter: SliceAndDiceQuestieDB
+
+Core.lua
+Data.lua
+UI.lua

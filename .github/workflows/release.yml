@@ -1,0 +1,49 @@
+name: Release
+
+# Push a tag like v0.2.0 to build SliceAndDiceQuestie-0.2.0.zip and publish it as a GitHub release.
+# Tags with a suffix (v0.2.0-beta1) are published as pre-releases.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Work out version
+        run: |
+          echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "ZIP=SliceAndDiceQuestie-${GITHUB_REF_NAME#v}.zip" >> "$GITHUB_ENV"
+
+      - name: Syntax-check Lua
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lua5.1
+          for f in *.lua; do luac5.1 -p "$f"; done
+
+      - name: Package
+        run: |
+          mkdir -p build/SliceAndDiceQuestie
+          # git archive leaves out anything marked export-ignore in .gitattributes
+          git archive HEAD | tar -x -C build/SliceAndDiceQuestie
+          sed -i "s/@project-version@/${VERSION}/" build/SliceAndDiceQuestie/SliceAndDiceQuestie.toc
+          grep -q "## Version: ${VERSION}" build/SliceAndDiceQuestie/SliceAndDiceQuestie.toc
+          (cd build && zip -qr "../${ZIP}" SliceAndDiceQuestie)
+          unzip -l "${ZIP}"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease="--prerelease"; fi
+          gh release create "$GITHUB_REF_NAME" "$ZIP" \
+            --title "SliceAndDiceQuestie ${VERSION}" \
+            --generate-notes $prerelease
